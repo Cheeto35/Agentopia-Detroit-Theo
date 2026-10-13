@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -8,6 +7,36 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from file_read_backwards import FileReadBackwards
 import os
+
+try:
+    import fcntl
+except ImportError:
+    # Windows has no fcntl. The simulation runs as a single process, so a
+    # per-file thread lock gives the same protection for its parallel writers.
+    import threading
+
+    class _WindowsFcntl:
+        LOCK_EX = 2
+        LOCK_UN = 8
+        _guard = threading.Lock()
+        _locks: Dict[str, threading.RLock] = {}
+        _held: Dict[int, threading.RLock] = {}
+
+        @classmethod
+        def flock(cls, fd: int, op: int) -> None:
+            if op == cls.LOCK_EX:
+                # The file's on-disk ID, so every handle to one file shares a lock.
+                key = str(os.fstat(fd).st_ino)
+                with cls._guard:
+                    lock = cls._locks.setdefault(key, threading.RLock())
+                lock.acquire()
+                cls._held[fd] = lock
+            elif op == cls.LOCK_UN:
+                lock = cls._held.pop(fd, None)
+                if lock is not None:
+                    lock.release()
+
+    fcntl = _WindowsFcntl()
 
 from src.world.clock import Clock, TimeState, Stage
 from src.world.scheduling import Schedule
