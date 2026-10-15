@@ -377,6 +377,9 @@ class FactionEngine:
         self.world._name2agent[name] = agent
         self._event("citizen_activated", member=name)
 
+    def _capped(self) -> bool:
+        return bool(getattr(self.world, "max_agents", None))
+
     def _all_neutral_names(self) -> list[str]:
         used = set()
         for f in self.state["factions"].values():
@@ -386,6 +389,10 @@ class FactionEngine:
             return out
         for p in sorted(self.persona_root.iterdir(), key=lambda x: x.name.lower()):
             if p.is_dir() and p.name not in used and self._profile_path(p.name) is not None:
+                # With --max-agents, recruit only from citizens already simulated
+                # so the faction layer never grows the population past the cap.
+                if self._capped() and p.name not in self.world._name2agent:
+                    continue
                 out.append(p.name)
         return out
 
@@ -635,7 +642,7 @@ class FactionEngine:
 
     def _check_expansion(self, faction_id: str) -> None:
         faction = self.state["factions"][faction_id]
-        if faction.get("expansion_triggered"):
+        if faction.get("expansion_triggered") or self._capped():
             return
         if len(faction.get("members", [])) < self.EXPANSION_THRESHOLD:
             return

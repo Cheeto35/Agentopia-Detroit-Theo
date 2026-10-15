@@ -161,11 +161,17 @@ class World:
             if p.is_dir()
             and (include_background or not (p / "_background.json").exists())
         ]
-        names = (
-            [p.name for p in all_dirs[:max_agents]]
-            if max_agents
-            else [p.name for p in all_dirs]
-        )
+        if max_agents:
+            # Faction leaders are activated by FactionEngine.bootstrap(), so they
+            # take slots inside the cap rather than being added on top of it.
+            from src.world.factions import FactionEngine
+
+            leaders = {f["leader"] for f in FactionEngine.FACTIONS.values()}
+            names = [p.name for p in all_dirs if p.name not in leaders][
+                : max(0, max_agents - len(leaders))
+            ]
+        else:
+            names = [p.name for p in all_dirs]
 
         # Ensure locations file and private homes exist for current run world
         from src.world.locations import get_location_store
@@ -315,7 +321,20 @@ class World:
         tmp = p.with_suffix(".json.tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
-        tmp.rename(p)
+        tmp.replace(p)  # rename() fails on Windows when p already exists
+
+    def _stop_requested(self) -> bool:
+        """True (and consumes the flag) if STOP_AFTER_WEEK exists in the run dir.
+
+        Created by STOP-AFTER-WEEK.bat so the run ends right after a checkpoint
+        and can be continued later with --resume without losing work.
+        """
+        flag = Path("data") / self.data_dir / "STOP_AFTER_WEEK"
+        if not flag.exists():
+            return False
+        flag.unlink(missing_ok=True)
+        self.logger.info("Stop requested: checkpoint saved, ending run cleanly")
+        return True
 
     def _resolve_resume_point(
         self, resume_from: Optional[Tuple[int, int]]
@@ -725,6 +744,9 @@ class World:
                 self.clock.set_week(week)
                 self.step()
                 self._write_checkpoint(current_year, week)
+                # Year-end bookkeeping must finish before a clean stop.
+                if week < n_week and self._stop_requested():
+                    return
 
             # Year-end
             self._update_yearly_profiles()
@@ -732,6 +754,8 @@ class World:
             self._calculate_rewards()
             # Advance checkpoint to next year (year-end complete)
             self._write_checkpoint(current_year + 1, 0)
+            if self._stop_requested():
+                return
 
         if verify_logger:
             verify_logger.info(
