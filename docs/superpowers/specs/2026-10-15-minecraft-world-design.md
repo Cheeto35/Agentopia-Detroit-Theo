@@ -100,14 +100,14 @@ mismatch, Minecraft is disabled for the session and a warning is logged.
 
 | Command | Fields | Reply / events |
 |---|---|---|
-| `sync_agents` | `agents:[{name, home, faction}]`, `places:[{name, kind, size}]` | `ok`; the mod spawns missing NPCs and removes extras |
-| `set_phase` | `year, week, stage, day?, slot?` | `ok`; sky time and HUD update |
-| `move` | `agent, place` | `ok` immediately; event `arrived {agent, place, teleported}` |
+| `sync_agents` | `agents:[{name, faction}]`, `places:[{name, size}]` | `ok {town_ready}`; once the town exists, the mod spawns missing NPCs in their rooms and removes extras |
+| `set_phase` | `year, week, stage, day, slot, send_home` | `ok`; sky time and HUD update. If `send_home` is true (plan, review, settle), every NPC walks to its room |
+| `move` | `agent` and either `place` (a place name or `"home"`) or `target_agent` | `ok` immediately (the sim does not wait for arrival); event `arrived {agent, teleported}` |
 | `say` | `agent, to, text` | `ok`; chat bubble above the NPC and a line in server chat |
 | `build` | `agent, blueprint, near` (`"home"` or place name) | `ok {job, plot}` or `error {reason}`; events `build_progress {job, pct}`, then `build_done {job, plot, place}` or `build_failed {job, reason}` |
 
 Error reasons: `unknown_agent`, `unknown_place`, `no_free_plot`,
-`unknown_blueprint`, `busy`.
+`unknown_blueprint`, `busy`, `town_not_ready`, `bad_request`.
 
 ## Behaviour
 
@@ -130,8 +130,19 @@ sim, whatever its speed (about 10 real minutes per sim day at 102 agents).
 - Look: one of Minecraft's built-in default player skins, chosen by a hash of
   the agent's name, so it is stable across restarts. Faction members get a
   coloured name tag. Nothing is fetched from the internet.
-- Movement: ground navigation at walking speed. If an NPC makes no progress for
-  20 s it teleports to the target, and `arrived` reports `teleported:true`.
+- Movement: ground navigation at walking speed, in segments of at most 48
+  blocks to keep pathfinding cheap. If an NPC makes no progress for 20 s it
+  teleports to the target, and `arrived` reports `teleported:true`.
+- **Where NPCs go:**
+  - Joint and public activities: the activity's location, matched to a known
+    place name.
+  - Solo activities: the first known place named in the activity text,
+    otherwise home.
+  - Builds: the plot.
+- **Chat bubbles:** a temporary text display above the NPC for 8 s.
+- The mod's outgoing messages to the sim go through a bounded queue on a
+  writer thread, so a paused or stalled sim can never block the Minecraft
+  server thread.
 - Idle: short random wander within the current place's bounding box.
 - The sim decides who exists and where they should be. The mod owns
   coordinates. On every (re)connect, `sync_agents` plus a `move` per NPC
@@ -141,10 +152,15 @@ sim, whatever its speed (about 10 real minutes per sim day at 102 agents).
 
 - World type: superflat. Generated once by `/agentopia town generate` after the
   first `sync_agents` (the mod needs the place list).
-- Layout: a street grid. It holds apartment towers (one 5×5 room per agent,
-  e.g. 4 towers × 26 rooms for 102 agents), one building per public place
-  sized by `size` (small/medium/large) with a name sign, the two faction HQs,
-  and at least 60 empty 7×7 build plots spread near the public places.
+- Layout: a grid of 16×16 cells, one chunk each, with paths between buildings.
+  - **Apartment blocks:** single-story, 6 rooms of 5×5 (3×3 inside) per cell,
+    one room per agent. That is 17 cells for 102 agents. Everything is at
+    ground level so NPCs never path up stairs.
+  - **Public places:** one building per place, sized by `size` (small 7×7,
+    medium 9×9, large 13×13), with a name sign.
+  - **The two faction HQs** (13×13).
+  - **Build plots:** at least 60 empty 7×7 plots, 4 per cell, interleaved
+    between the public places.
 - The town's chunks are force-loaded so NPCs act with no player nearby; the
   target area is at most 12×12 chunks.
 
@@ -159,7 +175,7 @@ Blueprints for v1 (costs are sim money):
 | `market_stall` | Market stall | 70 | 150 |
 | `shed` | Small shed | 110 | 200 |
 | `mural` | Mural wall | 45 | 80 |
-| `room_upgrade` | Upgrade my room | 30 | 120 (built inside the agent's own room, no plot) |
+| `room_upgrade` | Upgrade my room | 6 | 120 (furniture inside the agent's own 3×3 room, no plot) |
 
 - **Sim side:** during a solo activity's act turn, the agent's function list
   gains `build(blueprint, near)`. The prompt gains a short blueprint list with
@@ -195,7 +211,7 @@ without Minecraft exactly as today:
 
 ```json
 "minecraft": { "enabled": true, "host": "127.0.0.1", "port": 8770,
-               "move_timeout_s": 60, "build_timeout_s": 240 }
+               "reply_timeout_s": 5, "build_timeout_s": 240 }
 ```
 
 ## Failure handling
