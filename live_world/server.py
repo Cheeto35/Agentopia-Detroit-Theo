@@ -559,7 +559,9 @@ class WorldReader:
                 return True
         except Exception:
             pass
-        for pattern in ("scripts/run_detroit_persistent.py", "run_detroit_persistent.py"):
+        if sys.platform == "win32":
+            return self._process_running_windows()
+        for pattern in ("scripts/run_detroit_persistent.py", "run_detroit_persistent.py", "scripts/run_world.py"):
             try:
                 cp = subprocess.run(
                     ["pgrep", "-f", pattern],
@@ -573,6 +575,29 @@ class WorldReader:
             except Exception:
                 pass
         return False
+
+    def _process_running_windows(self) -> bool:
+        # pgrep does not exist on Windows; ask CIM for python command lines.
+        # Cached because the dashboard polls every few seconds.
+        cached = getattr(self, "_win_proc_cache", None)
+        if cached and time.time() - cached[0] < 10:
+            return cached[1]
+        running = False
+        try:
+            cp = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | ForEach-Object CommandLine"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=8,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            running = any(p in cp.stdout for p in ("run_world.py", "run_detroit_persistent.py"))
+        except Exception:
+            pass
+        self._win_proc_cache = (time.time(), running)
+        return running
 
     def _boot_state(self) -> tuple[str, float | None]:
         path = self.root / "runtime" / "boot_state"
@@ -684,8 +709,23 @@ class WorldReader:
 
         persona_root = run / "persona"
         all_agent_dirs = sorted([p for p in persona_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
-        background_dirs = [p for p in all_agent_dirs if (p / "_background.json").exists()]
-        agent_dirs = [p for p in all_agent_dirs if not (p / "_background.json").exists()]
+        # model_assignment.json lists exactly the personas the engine simulates
+        # (e.g. a --max-agents run copies every persona but only runs some).
+        active_names: set[str] | None = None
+        try:
+            assignment = json.loads((run / "model_assignment.json").read_text(encoding="utf-8"))
+            if isinstance(assignment, dict) and assignment:
+                active_names = set(assignment)
+        except Exception:
+            pass
+
+        def is_background(p: Path) -> bool:
+            if (p / "_background.json").exists():
+                return True
+            return active_names is not None and p.name not in active_names
+
+        background_dirs = [p for p in all_agent_dirs if is_background(p)]
+        agent_dirs = [p for p in all_agent_dirs if not is_background(p)]
 
         # First pass: determine the simulation's actually observed clock.  Do NOT
         # use activity_time from schedules because schedules can be weeks ahead.
