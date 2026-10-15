@@ -5,7 +5,9 @@ title Agentopia Simulation
 
 set "MODEL=qwen2.5:3b"
 set "WORLD=apartment"
-set "MAX_AGENTS=50"
+rem 102 = every persona in the apartment world (100) plus the 2 faction leaders.
+rem On this PC (RTX 2060 Super) that is about 110 minutes per simulated week.
+set "MAX_AGENTS=102"
 
 echo.
 echo ======================================================
@@ -21,6 +23,13 @@ if not exist ".venv\Scripts\python.exe" (
     echo Setting up the Python environment ^(first run only^)...
     python -m venv .venv || goto :failed
     ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt || goto :failed
+)
+
+rem Only one simulation at a time - two runs fight over the GPU and both crawl.
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | Where-Object { $_.CommandLine -like '*run_world.py*' }) { exit 1 }"
+if errorlevel 1 (
+    echo A simulation is already running. Close its window first, then try again.
+    goto :done
 )
 
 if not exist "config.json" (
@@ -42,7 +51,8 @@ curl -fsS http://127.0.0.1:11434/api/tags >nul 2>nul
 if errorlevel 1 (
     echo Starting Ollama...
     set "OLLAMA_CONTEXT_LENGTH=8192"
-    start "Ollama" /min "%OLLAMA%" serve
+    set "OLLAMA_NUM_PARALLEL=4"
+    start "Ollama" /min /belownormal "%OLLAMA%" serve
 )
 
 set /a TRIES=0
@@ -59,6 +69,10 @@ goto :wait_ollama
 
 :ollama_ready
 echo Ollama: ONLINE
+
+rem Below-normal CPU priority keeps the AI from competing with other servers
+rem on this PC. Model runners started later inherit it from Ollama.
+powershell -NoProfile -Command "Get-Process ollama*, llama-server -ErrorAction SilentlyContinue | ForEach-Object { try { $_.PriorityClass = 'BelowNormal' } catch {} }"
 
 "%OLLAMA%" list | findstr /c:"%MODEL%" >nul
 if errorlevel 1 (
@@ -89,7 +103,7 @@ echo ------------------------------------------------------
 echo.
 
 set "PYTHONUTF8=1"
-".venv\Scripts\python.exe" scripts\run_world.py --world %WORLD% --max-agents %MAX_AGENTS% %*
+start "" /b /wait /belownormal ".venv\Scripts\python.exe" scripts\run_world.py --world %WORLD% --max-agents %MAX_AGENTS% %*
 
 echo.
 echo ------------------------------------------------------
